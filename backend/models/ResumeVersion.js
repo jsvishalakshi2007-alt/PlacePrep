@@ -25,6 +25,11 @@ const resumeVersionSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    cloudinaryPublicId: {
+  type: String,
+  default: "",
+  select: false,
+},
     fileName: {
       type: String,
       trim: true,

@@ -28,3 +28,8 @@ yarn-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Archives
+*.zip
+*.tar.gz
+*.rar

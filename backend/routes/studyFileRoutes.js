@@ -2,18 +2,16 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
+const cloudinary = require("../config/cloudinary");
 const StudyFile = require("../models/StudyFile");
 const authMiddleware = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-const uploadDir = path.join(__dirname, "..", "uploads");
-fs.mkdirSync(uploadDir, { recursive: true });
-
+// Allowed document formats
 const allowedTypes = new Map([
   [".pdf", "application/pdf"],
   [".doc", "application/msword"],
@@ -24,18 +22,9 @@ const allowedTypes = new Map([
   [".txt", "text/plain"],
 ]);
 
-const storage = multer.diskStorage({
-  destination: (req, file, callback) => {
-    callback(null, uploadDir);
-  },
-
-  filename: (req, file, callback) => {
-    callback(null, crypto.randomUUID() + path.extname(file.originalname).toLowerCase());
-  },
-});
-
+// Use memory storage instead of local disk storage
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024,
     files: 1,
@@ -54,9 +43,51 @@ const upload = multer({
   },
 });
 
+// Upload buffer to Cloudinary as a private authenticated raw file
+const uploadToCloudinary = (file) => {
+  return new Promise((resolve, reject) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    const publicId = crypto.randomUUID() + ext;
+
+const stream = cloudinary.uploader.upload_stream(
+  {
+    resource_type: "raw",
+    type: "authenticated",
+    public_id: publicId,
+    asset_folder: "placeprep/study-files",
+    overwrite: false,
+  },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+
+    stream.end(file.buffer);
+  });
+};
+
+// Generate a temporary authenticated download URL
+const getPrivateDownloadUrl = (publicId, originalName) => {
+  const ext = path.extname(originalName).toLowerCase().replace(".", "");
+
+  return cloudinary.utils.private_download_url(
+    publicId,
+    ext,
+    {
+      resource_type: "raw",
+      type: "authenticated",
+      expires_at: Math.floor(Date.now() / 1000) + 300,
+      attachment: true,
+    }
+  );
+};
+
+// All routes require authentication
 router.use(authMiddleware);
 
-// Upload one study file
+// Upload study file
 router.post("/", (req, res, next) => {
   upload.single("file")(req, res, (error) => {
     if (error) {
@@ -68,18 +99,22 @@ router.post("/", (req, res, next) => {
     next();
   });
 }, async (req, res) => {
-  let uploadedPath;
+  let uploadedPublicId;
 
   try {
     if (!req.file) {
-      return res.status(400).json({ message: "Select a file to upload." });
+      return res.status(400).json({
+        message: "Select a file to upload.",
+      });
     }
 
-    uploadedPath = req.file.path;
+    const result = await uploadToCloudinary(req.file);
+    uploadedPublicId = result.public_id;
 
     const savedFile = await StudyFile.create({
       originalName: path.basename(req.file.originalname).slice(0, 255),
-      storedName: req.file.filename,
+      storedName: result.public_id,
+      fileUrl: result.secure_url,
       mimeType: req.file.mimetype,
       size: req.file.size,
       userId: req.user.id,
@@ -87,32 +122,47 @@ router.post("/", (req, res, next) => {
 
     res.status(201).json(savedFile);
   } catch (error) {
-    if (uploadedPath) {
-      await fs.promises.unlink(uploadedPath).catch(() => {});
+    console.error("Study file upload error:", error);
+
+    if (uploadedPublicId) {
+      await cloudinary.uploader.destroy(uploadedPublicId, {
+        resource_type: "raw",
+        type: "authenticated",
+      }).catch(() => {});
     }
 
-    res.status(500).json({ message: "Could not save the uploaded file." });
+    res.status(500).json({
+      message: "Could not save the study file.",
+    });
   }
 });
 
-// List the logged-in user's files
+// Get logged-in user's study files
 router.get("/", async (req, res) => {
   try {
-    const files = await StudyFile.find({ userId: req.user.id })
-      .select("-storedName")
+    const files = await StudyFile.find({
+      userId: req.user.id,
+    })
+      .select("-storedName -fileUrl")
       .sort({ createdAt: -1 });
 
     res.json(files);
   } catch (error) {
-    res.status(500).json({ message: "Could not fetch study files." });
+    console.error("Fetch study files error:", error);
+
+    res.status(500).json({
+      message: "Could not fetch study files.",
+    });
   }
 });
 
-// Download a file owned by the logged-in user
+// Download study file
 router.get("/:id/download", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid file ID." });
+      return res.status(400).json({
+        message: "Invalid file ID.",
+      });
     }
 
     const file = await StudyFile.findOne({
@@ -121,44 +171,65 @@ router.get("/:id/download", async (req, res) => {
     });
 
     if (!file) {
-      return res.status(404).json({ message: "Study file not found." });
+      return res.status(404).json({
+        message: "Study file not found.",
+      });
     }
 
-    const filePath = path.join(uploadDir, file.storedName);
+    const downloadUrl = getPrivateDownloadUrl(
+      file.storedName,
+      file.originalName
+    );
 
-    return res.download(filePath, file.originalName, (error) => {
-      if (error && !res.headersSent) {
-        res.status(404).json({ message: "File is unavailable." });
-      }
-    });
+    res.redirect(302, downloadUrl);
   } catch (error) {
-    res.status(500).json({ message: "Could not download the file." });
+    console.error("Study file download error:", error);
+
+    res.status(500).json({
+      message: "Could not download the study file.",
+    });
   }
 });
 
-// Delete a file owned by the logged-in user
+// Delete study file
 router.delete("/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid file ID." });
+      return res.status(400).json({
+        message: "Invalid file ID.",
+      });
     }
 
-    const file = await StudyFile.findOneAndDelete({
+    const file = await StudyFile.findOne({
       _id: req.params.id,
       userId: req.user.id,
     });
 
     if (!file) {
-      return res.status(404).json({ message: "Study file not found." });
+      return res.status(404).json({
+        message: "Study file not found.",
+      });
     }
 
-    await fs.promises
-      .unlink(path.join(uploadDir, file.storedName))
-      .catch(() => {});
+    await cloudinary.uploader.destroy(file.storedName, {
+      resource_type: "raw",
+      type: "authenticated",
+    });
 
-    res.json({ message: "Study file deleted successfully." });
+    await StudyFile.deleteOne({
+      _id: file._id,
+      userId: req.user.id,
+    });
+
+    res.json({
+      message: "Study file deleted successfully.",
+    });
   } catch (error) {
-    res.status(500).json({ message: "Could not delete the study file." });
+    console.error("Study file deletion error:", error);
+
+    res.status(500).json({
+      message: "Could not delete the study file.",
+    });
   }
 });
 

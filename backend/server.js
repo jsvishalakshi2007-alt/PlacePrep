@@ -1,11 +1,10 @@
+
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const path = require("path");
-const fs = require("fs");
 require("dotenv").config();
 
-// Existing routes
+// Import routes
 const taskRoutes = require("./routes/taskRoutes");
 const applicationRoutes = require("./routes/applicationRoutes");
 const problemRoutes = require("./routes/problemRoutes");
@@ -24,17 +23,7 @@ const timelineRoutes = require("./routes/timelineRoutes");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Ensure uploads folder exists
-const uploadDir = path.join(__dirname, "uploads");
-const resumeUploadDir = path.join(uploadDir, "resumes");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-if (!fs.existsSync(resumeUploadDir)) {
-  fs.mkdirSync(resumeUploadDir, { recursive: true });
-}
-
-// CORS configuration
+// CORS
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
@@ -45,11 +34,15 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-      if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        origin.endsWith(".vercel.app") ||
+        process.env.NODE_ENV !== "production"
+      ) {
         return callback(null, true);
       }
-      return callback(null, true); // Permissive for preview/testing
+      return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -58,7 +51,55 @@ app.use(
 );
 
 app.use(express.json());
-app.use("/uploads", express.static(uploadDir));
+
+// Root and API health check
+app.get(["/", "/api"], (req, res) => {
+  res.json({
+    message: "Welcome to PlacePrep API!",
+    status: "Backend is running successfully",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// MongoDB connection cache for serverless requests
+let mongoConnectionPromise;
+
+async function connectDB() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  if (!process.env.MONGO_URI) {
+    throw new Error("MONGO_URI environment variable is missing");
+  }
+
+  if (!mongoConnectionPromise) {
+    mongoConnectionPromise = mongoose
+      .connect(process.env.MONGO_URI)
+      .catch((error) => {
+        mongoConnectionPromise = null;
+        throw error;
+      });
+  }
+
+  await mongoConnectionPromise;
+}
+
+// Connect before handling API requests
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error("MongoDB connection failed:", error.message || error);
+    if (!process.env.MONGO_URI) {
+      return res.status(503).json({
+        message: "Database connection failed: MONGO_URI is missing from environment variables. Please add MONGO_URI in your Vercel Project Settings.",
+      });
+    }
+    next(error);
+  }
+});
 
 // API routes
 app.use("/api/auth", authRoutes);
@@ -76,42 +117,30 @@ app.use("/api/skills", skillRoutes);
 app.use("/api/resumes", resumeRoutes);
 app.use("/api/timeline", timelineRoutes);
 
-// Root health check route
-app.get("/", (req, res) => {
-  res.json({
-    message: "Welcome to PlacePrep API!",
-    status: "Backend is running successfully",
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// Centralized error handling middleware
+// Error handler
 app.use((err, req, res, next) => {
   console.error("Unhandled server error:", err);
-  const status = err.status || 500;
-  res.status(status).json({
-    message: err.message || "Internal server error.",
-    ...(process.env.NODE_ENV === "development" ? { stack: err.stack } : {}),
+
+  res.status(err.status || 500).json({
+    message: err.message || "Internal server error",
+    ...(process.env.NODE_ENV === "development"
+      ? { stack: err.stack }
+      : {}),
   });
 });
 
-// Connect to MongoDB and start the server
-if (process.env.MONGO_URI) {
-  mongoose
-    .connect(process.env.MONGO_URI)
+// Local development only. Vercel imports the app without listening on a port.
+if (require.main === module) {
+  connectDB()
     .then(() => {
-      console.log("MongoDB connected successfully!");
-
       app.listen(PORT, () => {
-        console.log(`PlacePrep backend running at http://localhost:${PORT}`);
+        console.log(`PlacePrep backend running on port ${PORT}`);
       });
     })
     .catch((error) => {
-      console.error("MongoDB connection failed:", error.message);
+      console.error("MongoDB connection failed:", error);
       process.exit(1);
     });
-} else {
-  console.warn("MONGO_URI not specified in environment.");
 }
 
 module.exports = app;

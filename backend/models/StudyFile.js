@@ -9,23 +9,23 @@ const studyFileSchema = new mongoose.Schema(
       trim: true,
       maxlength: 255,
     },
-
     storedName: {
       type: String,
       required: true,
       unique: true,
     },
-
+    fileUrl: {
+      type: String,
+      required: true,
+    },
     mimeType: {
       type: String,
       required: true,
     },
-
     size: {
       type: Number,
       required: true,
     },
-
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

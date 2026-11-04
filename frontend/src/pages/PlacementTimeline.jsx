@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { getTimeline } from "../api/timelineApi";
 import Badge from "../components/common/Badge";
 import EmptyState from "../components/common/EmptyState";
@@ -20,6 +21,7 @@ const RANGE_FILTERS = [
 ];
 
 export default function PlacementTimeline() {
+  const navigate = useNavigate();
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState("all");
@@ -110,6 +112,8 @@ export default function PlacementTimeline() {
             icon="⏱"
             title="No timeline events recorded"
             message="As you submit applications, solve DSA problems, schedule mock interviews, and complete study goals, they will appear in this unified stream."
+            actionLabel="Explore Target Companies & Planner"
+            onAction={() => navigate("/companies")}
           />
         </div>
       ) : (

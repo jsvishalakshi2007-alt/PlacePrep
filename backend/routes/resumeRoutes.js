@@ -1,196 +1,275 @@
+
 const express = require("express");
 const mongoose = require("mongoose");
 const path = require("path");
-const fs = require("fs");
 const multer = require("multer");
+const crypto = require("crypto");
+
 const router = express.Router();
+
 const ResumeVersion = require("../models/ResumeVersion");
 const authMiddleware = require("../middleware/authMiddleware");
+const cloudinary = require("../config/cloudinary");
 
-// Configure Multer for local disk storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const dir = path.join(__dirname, "..", "uploads", "resumes");
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    cb(null, dir);
-  },
-  filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname);
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `resume-${uniqueSuffix}${ext}`);
-  },
-});
+router.use(authMiddleware);
 
-const fileFilter = (req, file, cb) => {
-  const allowedExtensions = [".pdf", ".docx", ".doc"];
-  const ext = path.extname(file.originalname).toLowerCase();
-  if (allowedExtensions.includes(ext)) {
-    cb(null, true);
-  } else {
-    cb(new Error("Only PDF and Word documents (.pdf, .docx, .doc) are supported."), false);
-  }
-};
-
+// Multer stores uploads temporarily in memory.
+// Cloudinary stores the permanent file.
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-  fileFilter,
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedExtensions = [".pdf", ".doc", ".docx"];
+    const ext = path.extname(file.originalname).toLowerCase();
+
+    if (!allowedExtensions.includes(ext)) {
+      return cb(
+        new Error("Only PDF, DOC and DOCX files are supported.")
+      );
+    }
+
+    cb(null, true);
+  },
 });
 
 const handleUpload = (req, res, next) => {
   upload.single("resumeFile")(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === "LIMIT_FILE_SIZE") {
-        return res.status(400).json({ message: "File is too large. Maximum size allowed is 10MB." });
-      }
-      return res.status(400).json({ message: `Upload error: ${err.message}` });
-    } else if (err) {
-      return res.status(400).json({ message: err.message });
+    if (err) {
+      return res.status(400).json({
+        message:
+          err.code === "LIMIT_FILE_SIZE"
+            ? "File is too large. Maximum size is 10MB."
+            : err.message,
+      });
     }
     next();
   });
 };
 
-router.use(authMiddleware);
+// Upload a private resume to Cloudinary.
+const uploadToCloudinary = (file) => {
+  return new Promise((resolve, reject) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const publicId = `resume-${crypto.randomUUID()}${ext}`;
 
-// Helper to remove a file from disk safely
-const safelyUnlinkFile = (filePath) => {
-  if (!filePath) return;
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: "raw",
+        type: "authenticated",
+        public_id: publicId,
+        asset_folder: "placeprep/resumes",
+        overwrite: false,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+
+    stream.end(file.buffer);
+  });
+};
+
+// Delete a Cloudinary asset safely.
+const deleteCloudinaryFile = async (publicId) => {
+  if (!publicId) return;
+
   try {
-    const resolvedPath = path.isAbsolute(filePath)
-      ? filePath
-      : path.join(__dirname, "..", filePath);
-    if (fs.existsSync(resolvedPath)) {
-      fs.unlinkSync(resolvedPath);
-    }
-  } catch (err) {
-    console.error("Failed to delete resume file from disk:", err.message);
+    await cloudinary.uploader.destroy(publicId, {
+      resource_type: "raw",
+      type: "authenticated",
+    });
+  } catch (error) {
+    console.error("Cloudinary deletion failed:", error.message);
   }
 };
 
-// GET /: List resume versions for current user
+// Generate a short-lived authenticated download/preview URL.
+const getPrivateUrl = (resume, attachment = true) => {
+  if (!resume.cloudinaryPublicId) return null;
+
+  const ext = path.extname(resume.originalName || "").replace(".", "");
+
+  return cloudinary.utils.private_download_url(
+    resume.cloudinaryPublicId,
+    ext,
+    {
+      resource_type: "raw",
+      type: "authenticated",
+      expires_at: Math.floor(Date.now() / 1000) + 300,
+      attachment,
+    }
+  );
+};
+
+// GET /api/resumes
 router.get("/", async (req, res) => {
   try {
-    const resumes = await ResumeVersion.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    res.json(resumes);
+    const resumes = await ResumeVersion.find({
+      userId: req.user.id,
+    }).sort({ createdAt: -1 });
+
+    const result = resumes.map((resume) => {
+      const item = resume.toObject();
+
+      // Do not expose permanent Cloudinary identifiers.
+      delete item.cloudinaryPublicId;
+
+      return item;
+    });
+
+    res.json(result);
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch resume versions", error: error.message });
+    res.status(500).json({
+      message: "Failed to fetch resume versions",
+      error: error.message,
+    });
   }
 });
 
-// POST /upload: Upload new resume file
+// POST /api/resumes/upload
 router.post("/upload", handleUpload, async (req, res) => {
+  let uploadedPublicId = null;
+
   try {
     if (!req.file) {
-      return res.status(400).json({ message: "No resume file was uploaded." });
+      return res.status(400).json({
+        message: "No resume file was uploaded.",
+      });
     }
 
     const { title, version, targetRole, changelog, isPrimary } = req.body;
-    const shouldBePrimary = isPrimary === "true" || isPrimary === true;
+
+    const existingCount = await ResumeVersion.countDocuments({
+      userId: req.user.id,
+    });
+
+    const shouldBePrimary =
+      isPrimary === "true" ||
+      isPrimary === true ||
+      existingCount === 0;
+
+    const result = await uploadToCloudinary(req.file);
+    uploadedPublicId = result.public_id;
 
     if (shouldBePrimary) {
-      await ResumeVersion.updateMany({ userId: req.user.id }, { isPrimary: false });
-    } else {
-      // If user has no existing resumes, make this one primary
-      const existingCount = await ResumeVersion.countDocuments({ userId: req.user.id });
-      if (existingCount === 0) {
-        req.body.isPrimary = true;
-      }
+      await ResumeVersion.updateMany(
+        { userId: req.user.id },
+        { isPrimary: false }
+      );
     }
 
-    const relativePath = path.join("uploads", "resumes", req.file.filename).replace(/\\/g, "/");
-    const resumeTitle = title && title.trim()
-      ? title.trim()
-      : path.parse(req.file.originalname).name;
-
     const resume = await ResumeVersion.create({
-      title: resumeTitle,
-      version: version ? version.trim() : "1.0",
-      targetRole: targetRole ? targetRole.trim() : "Software Engineer",
-      fileUrl: `/${relativePath}`,
-      fileName: req.file.filename,
+      title:
+        title?.trim() ||
+        path.parse(req.file.originalname).name,
+
+      version: version?.trim() || "1.0",
+      targetRole: targetRole?.trim() || "Software Engineer",
+
+      fileUrl: result.secure_url,
+      fileName: result.public_id,
       originalName: req.file.originalname,
       fileSize: req.file.size,
       fileType: req.file.mimetype || "application/pdf",
-      filePath: req.file.path,
-      changelog: changelog ? changelog.trim() : "Initial upload",
-      isPrimary: shouldBePrimary || Boolean(req.body.isPrimary),
+      cloudinaryPublicId: result.public_id,
+
+      filePath: "",
+      changelog: changelog?.trim() || "Initial upload",
+      isPrimary: shouldBePrimary,
       userId: req.user.id,
     });
 
     res.status(201).json(resume);
   } catch (error) {
-    if (req.file && req.file.path) {
-      safelyUnlinkFile(req.file.path);
+    if (uploadedPublicId) {
+      await deleteCloudinaryFile(uploadedPublicId);
     }
-    res.status(400).json({ message: error.message || "Failed to upload resume" });
+
+    res.status(500).json({
+      message: error.message || "Failed to upload resume.",
+    });
   }
 });
 
-// POST /:id/replace: Replace the resume file for an existing version
+// POST /api/resumes/:id/replace
 router.post("/:id/replace", handleUpload, async (req, res) => {
+  let uploadedPublicId = null;
+
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      if (req.file && req.file.path) safelyUnlinkFile(req.file.path);
-      return res.status(400).json({ message: "Invalid resume ID." });
+      return res.status(400).json({
+        message: "Invalid resume ID.",
+      });
     }
 
     if (!req.file) {
-      return res.status(400).json({ message: "No replacement resume file was provided." });
+      return res.status(400).json({
+        message: "No replacement resume file was provided.",
+      });
     }
 
-    const existingResume = await ResumeVersion.findOne({
+    const resume = await ResumeVersion.findOne({
       _id: req.params.id,
       userId: req.user.id,
     });
 
-    if (!existingResume) {
-      if (req.file && req.file.path) safelyUnlinkFile(req.file.path);
-      return res.status(404).json({ message: "Resume version not found or unauthorized" });
+    if (!resume) {
+      return res.status(404).json({
+        message: "Resume version not found.",
+      });
     }
 
-    // Safely remove the old file from disk
-    if (existingResume.filePath) {
-      safelyUnlinkFile(existingResume.filePath);
-    } else if (existingResume.fileName) {
-      safelyUnlinkFile(path.join(__dirname, "..", "uploads", "resumes", existingResume.fileName));
+    const result = await uploadToCloudinary(req.file);
+    uploadedPublicId = result.public_id;
+
+    const oldPublicId = resume.cloudinaryPublicId;
+
+    resume.fileUrl = result.secure_url;
+    resume.fileName = result.public_id;
+    resume.originalName = req.file.originalname;
+    resume.fileSize = req.file.size;
+    resume.fileType = req.file.mimetype || "application/pdf";
+    resume.cloudinaryPublicId = result.public_id;
+    resume.filePath = "";
+
+    if (req.body.version?.trim()) {
+      resume.version = req.body.version.trim();
     }
 
-    const relativePath = path.join("uploads", "resumes", req.file.filename).replace(/\\/g, "/");
-
-    existingResume.fileName = req.file.filename;
-    existingResume.originalName = req.file.originalname;
-    existingResume.fileSize = req.file.size;
-    existingResume.fileType = req.file.mimetype || "application/pdf";
-    existingResume.filePath = req.file.path;
-    existingResume.fileUrl = `/${relativePath}`;
-
-    if (req.body.version && req.body.version.trim()) {
-      existingResume.version = req.body.version.trim();
-    }
-    if (req.body.changelog && req.body.changelog.trim()) {
-      existingResume.changelog = req.body.changelog.trim();
-    }
-    if (req.body.title && req.body.title.trim()) {
-      existingResume.title = req.body.title.trim();
+    if (req.body.changelog?.trim()) {
+      resume.changelog = req.body.changelog.trim();
     }
 
-    await existingResume.save();
+    if (req.body.title?.trim()) {
+      resume.title = req.body.title.trim();
+    }
 
-    res.json(existingResume);
+    await resume.save();
+
+    if (oldPublicId) {
+      await deleteCloudinaryFile(oldPublicId);
+    }
+
+    res.json(resume);
   } catch (error) {
-    if (req.file && req.file.path) safelyUnlinkFile(req.file.path);
-    res.status(400).json({ message: error.message || "Failed to replace resume file" });
+    if (uploadedPublicId) {
+      await deleteCloudinaryFile(uploadedPublicId);
+    }
+
+    res.status(500).json({
+      message: error.message || "Failed to replace resume file.",
+    });
   }
 });
 
-// GET /:id/download: Download resume file with original filename
+// GET /api/resumes/:id/download
 router.get("/:id/download", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid resume ID." });
+      return res.status(400).json({
+        message: "Invalid resume ID.",
+      });
     }
 
     const resume = await ResumeVersion.findOne({
@@ -199,30 +278,34 @@ router.get("/:id/download", async (req, res) => {
     });
 
     if (!resume) {
-      return res.status(404).json({ message: "Resume version not found or unauthorized" });
+      return res.status(404).json({
+        message: "Resume not found.",
+      });
     }
 
-    let filePathOnDisk = resume.filePath;
-    if (!filePathOnDisk && resume.fileName) {
-      filePathOnDisk = path.join(__dirname, "..", "uploads", "resumes", resume.fileName);
+    const url = getPrivateUrl(resume, true);
+
+    if (url) {
+      return res.redirect(302, url);
     }
 
-    if (!filePathOnDisk || !fs.existsSync(filePathOnDisk)) {
-      return res.status(404).json({ message: "Resume file not found on disk." });
-    }
-
-    const downloadName = resume.originalName || `${resume.title || "resume"}.pdf`;
-    res.download(filePathOnDisk, downloadName);
+    return res.status(404).json({
+      message: "This resume has no Cloudinary file. Please upload it again.",
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message || "Failed to download resume" });
+    res.status(500).json({
+      message: error.message || "Failed to download resume.",
+    });
   }
 });
 
-// GET /:id/preview: Inline preview for in-browser viewing
+// GET /api/resumes/:id/preview
 router.get("/:id/preview", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid resume ID." });
+      return res.status(400).json({
+        message: "Invalid resume ID.",
+      });
     }
 
     const resume = await ResumeVersion.findOne({
@@ -231,121 +314,159 @@ router.get("/:id/preview", async (req, res) => {
     });
 
     if (!resume) {
-      return res.status(404).json({ message: "Resume version not found or unauthorized" });
+      return res.status(404).json({
+        message: "Resume not found.",
+      });
     }
 
-    let filePathOnDisk = resume.filePath;
-    if (!filePathOnDisk && resume.fileName) {
-      filePathOnDisk = path.join(__dirname, "..", "uploads", "resumes", resume.fileName);
+    if (resume.fileType !== "application/pdf") {
+      return res.status(400).json({
+        message: "Browser preview is available only for PDF files.",
+      });
     }
 
-    if (!filePathOnDisk || !fs.existsSync(filePathOnDisk)) {
-      return res.status(404).json({ message: "Resume file not found on disk." });
+    const url = getPrivateUrl(resume, false);
+
+    if (url) {
+      return res.redirect(302, url);
     }
 
-    res.setHeader("Content-Type", resume.fileType || "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="${resume.originalName || resume.fileName || "resume.pdf"}"`
-    );
-
-    const stream = fs.createReadStream(filePathOnDisk);
-    stream.pipe(res);
+    return res.status(404).json({
+      message: "This resume has no Cloudinary file. Please upload it again.",
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message || "Failed to preview resume" });
+    res.status(500).json({
+      message: error.message || "Failed to preview resume.",
+    });
   }
 });
 
-// POST /: Add a resume version (JSON metadata fallback)
+// POST /api/resumes
 router.post("/", async (req, res) => {
   try {
-    const { title, version, targetRole, fileUrl, changelog, isPrimary } = req.body;
+    const { title, version, targetRole, changelog, isPrimary } = req.body;
 
-    if (!title || !title.trim()) {
-      return res.status(400).json({ message: "Resume title is required." });
+    if (!title?.trim()) {
+      return res.status(400).json({
+        message: "Resume title is required.",
+      });
     }
 
-    if (isPrimary) {
-      await ResumeVersion.updateMany({ userId: req.user.id }, { isPrimary: false });
+    const existingCount = await ResumeVersion.countDocuments({
+      userId: req.user.id,
+    });
+
+    const shouldBePrimary =
+      Boolean(isPrimary) || existingCount === 0;
+
+    if (shouldBePrimary) {
+      await ResumeVersion.updateMany(
+        { userId: req.user.id },
+        { isPrimary: false }
+      );
     }
 
     const resume = await ResumeVersion.create({
       title: title.trim(),
-      version: version ? version.trim() : "1.0",
-      targetRole: targetRole ? targetRole.trim() : "Software Engineer",
-      fileUrl: fileUrl ? fileUrl.trim() : "",
-      changelog: changelog ? changelog.trim() : "",
-      isPrimary: Boolean(isPrimary),
+      version: version?.trim() || "1.0",
+      targetRole: targetRole?.trim() || "Software Engineer",
+      changelog: changelog?.trim() || "",
+      isPrimary: shouldBePrimary,
       userId: req.user.id,
     });
 
     res.status(201).json(resume);
   } catch (error) {
-    res.status(400).json({ message: error.message || "Failed to add resume version" });
+    res.status(400).json({
+      message: error.message || "Failed to add resume version.",
+    });
   }
 });
 
-// PATCH /:id: Update a resume version metadata
+// PATCH /api/resumes/:id
 router.patch("/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid resume ID." });
+      return res.status(400).json({
+        message: "Invalid resume ID.",
+      });
     }
 
-    if (req.body.isPrimary) {
-      await ResumeVersion.updateMany({ userId: req.user.id }, { isPrimary: false });
-    }
-
-    const allowedFields = ["title", "version", "targetRole", "fileUrl", "changelog", "isPrimary"];
     const updates = {};
+    const allowedFields = [
+      "title",
+      "version",
+      "targetRole",
+      "changelog",
+      "isPrimary",
+    ];
+
     for (const field of allowedFields) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {
         updates[field] = req.body[field];
       }
     }
 
+    if (updates.isPrimary === true) {
+      await ResumeVersion.updateMany(
+        { userId: req.user.id },
+        { isPrimary: false }
+      );
+    }
+
     const resume = await ResumeVersion.findOneAndUpdate(
       { _id: req.params.id, userId: req.user.id },
       { $set: updates },
-      { returnDocument: "after", runValidators: true }
+      { new: true, runValidators: true }
     );
 
     if (!resume) {
-      return res.status(404).json({ message: "Resume version not found or unauthorized" });
+      return res.status(404).json({
+        message: "Resume version not found.",
+      });
     }
 
     res.json(resume);
   } catch (error) {
-    res.status(400).json({ message: error.message || "Failed to update resume version" });
+    res.status(400).json({
+      message: error.message || "Failed to update resume.",
+    });
   }
 });
 
-// DELETE /:id: Delete a resume version and remove file from disk
+// DELETE /api/resumes/:id
 router.delete("/:id", async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid resume ID." });
+      return res.status(400).json({
+        message: "Invalid resume ID.",
+      });
     }
 
-    const resume = await ResumeVersion.findOneAndDelete({
+    const resume = await ResumeVersion.findOne({
       _id: req.params.id,
       userId: req.user.id,
     });
 
     if (!resume) {
-      return res.status(404).json({ message: "Resume version not found or unauthorized" });
+      return res.status(404).json({
+        message: "Resume version not found.",
+      });
     }
 
-    // Unlink the file from disk
-    if (resume.filePath) {
-      safelyUnlinkFile(resume.filePath);
-    } else if (resume.fileName) {
-      safelyUnlinkFile(path.join(__dirname, "..", "uploads", "resumes", resume.fileName));
+    if (resume.cloudinaryPublicId) {
+      await deleteCloudinaryFile(resume.cloudinaryPublicId);
     }
 
-    res.json({ message: "Resume version removed successfully" });
+    await resume.deleteOne();
+
+    res.json({
+      message: "Resume version removed successfully.",
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message || "Failed to delete resume version" });
+    res.status(500).json({
+      message: error.message || "Failed to delete resume.",
+    });
   }
 });
 

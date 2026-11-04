@@ -811,6 +811,7 @@ export default function CompanyHub() {
       {/* Preset Modal */}
       {presetModalOpen && (
         <Modal
+          open={true}
           title="Pick a Target Company Preset"
           onClose={() => setPresetModalOpen(false)}
           className="modal-lg"
@@ -859,6 +860,7 @@ export default function CompanyHub() {
       {/* Add / Edit Company Modal */}
       {modalOpen && (
         <Modal
+          open={true}
           title={editingId ? "Edit Target Company" : "Add Target Company"}
           onClose={() => setModalOpen(false)}
           className="modal-lg"
@@ -988,6 +990,7 @@ export default function CompanyHub() {
       {/* Detailed Preparation View Modal */}
       {detailCompany && (
         <Modal
+          open={true}
           title={`${detailCompany.name} — Detailed Preparation Plan`}
           onClose={() => setDetailCompany(null)}
           className="modal-lg"

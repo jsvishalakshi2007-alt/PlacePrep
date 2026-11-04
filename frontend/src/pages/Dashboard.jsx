@@ -422,6 +422,7 @@ export default function Dashboard() {
       {/* Smart Readiness Score Modal */}
       {readinessModalOpen && (
         <Modal
+          open={true}
           title="Smart Placement Readiness Assessment"
           onClose={() => setReadinessModalOpen(false)}
           className="modal-lg"

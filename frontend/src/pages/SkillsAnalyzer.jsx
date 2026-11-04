@@ -1035,6 +1035,7 @@ export default function SkillsAnalyzer() {
       {/* Skill Modal */}
       {skillModalOpen && (
         <Modal
+          open={true}
           title={editingSkillId ? "Edit Technical Skill" : "Add Technical Skill"}
           onClose={() => setSkillModalOpen(false)}
         >
@@ -1109,6 +1110,7 @@ export default function SkillsAnalyzer() {
       {/* Resume Upload Modal */}
       {resumeModalOpen && (
         <Modal
+          open={true}
           title="Upload Resume Document"
           onClose={() => setResumeModalOpen(false)}
         >
@@ -1222,6 +1224,7 @@ export default function SkillsAnalyzer() {
       {/* Replace Resume Modal */}
       {replaceModalOpen && replaceTargetResume && (
         <Modal
+          open={true}
           title={`Replace Resume — ${replaceTargetResume.title}`}
           onClose={() => setReplaceModalOpen(false)}
         >
@@ -1307,6 +1310,7 @@ export default function SkillsAnalyzer() {
       {/* In-App Resume Preview Modal */}
       {previewModalResume && (
         <Modal
+          open={true}
           title={`Resume Preview — ${previewModalResume.title} (${previewModalResume.version})`}
           onClose={() => setPreviewModalResume(null)}
           className="modal-lg"

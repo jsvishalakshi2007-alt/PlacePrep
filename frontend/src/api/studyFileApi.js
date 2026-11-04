@@ -1,4 +1,4 @@
-import apiClient from "./client";
+import apiClient, { getBaseURL } from "./client";
 
 export const getStudyFiles = async () => {
   return apiClient.get("/study-files");
@@ -17,7 +17,7 @@ export const uploadStudyFile = async (file) => {
 
 export const downloadStudyFile = async (id, originalName) => {
   const token = localStorage.getItem("placeprepToken");
-  const baseURL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+  const baseURL = getBaseURL();
 
   const response = await fetch(`${baseURL}/study-files/${encodeURIComponent(id)}/download`, {
     headers: {

@@ -1,6 +1,21 @@
 import axios from "axios";
 
-const baseURL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+export const getBaseURL = () => {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  // In production deployments (e.g. Vercel), default to relative /api on the same domain
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname !== "localhost" &&
+    window.location.hostname !== "127.0.0.1"
+  ) {
+    return "/api";
+  }
+  return "http://localhost:5000/api";
+};
+
+const baseURL = getBaseURL();
 
 const apiClient = axios.create({
   baseURL,

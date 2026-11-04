@@ -13,14 +13,20 @@ export default function Header() {
         return "Dashboard Overview";
       case "/applications":
         return "Job & Internship Applications";
+      case "/companies":
+        return "Target Companies & Interview Loops";
       case "/practice":
         return "DSA & Coding Practice";
       case "/planner":
         return "Study Planner & Tasks";
+      case "/skills":
+        return "Skills Gap & Resume Analyzer";
       case "/deadlines":
         return "Upcoming Deadlines";
       case "/mock-interviews":
         return "Mock Interview Management";
+      case "/timeline":
+        return "Placement Journey Timeline";
       case "/notes":
         return "Notes, Resources & Files";
       case "/profile":

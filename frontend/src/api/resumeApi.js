@@ -1,38 +1,34 @@
-import apiClient from "./client";
 
-const baseURL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+import apiClient, { getBaseURL } from "./client";
 
-export const getResumes = async () => {
-  return apiClient.get("/resumes");
-};
+const baseURL = getBaseURL();
 
-export const addResume = async (resume) => {
-  return apiClient.post("/resumes", resume);
-};
+export const getResumes = () => apiClient.get("/resumes");
 
-export const uploadResumeFile = async (formData) => {
-  return apiClient.post("/resumes/upload", formData, {
+export const addResume = (resume) =>
+  apiClient.post("/resumes", resume);
+
+export const uploadResumeFile = (formData) =>
+  apiClient.post("/resumes/upload", formData, {
     headers: {
-      "Content-Type": "multipart/form-data",
+      "Content-Type": undefined,
     },
+    timeout: 60000,
   });
-};
 
-export const replaceResumeFile = async (id, formData) => {
-  return apiClient.post(`/resumes/${id}/replace`, formData, {
+export const replaceResumeFile = (id, formData) =>
+  apiClient.post(`/resumes/${id}/replace`, formData, {
     headers: {
-      "Content-Type": "multipart/form-data",
+      "Content-Type": undefined,
     },
+    timeout: 60000,
   });
-};
 
-export const updateResume = async (id, updates) => {
-  return apiClient.patch(`/resumes/${id}`, updates);
-};
+export const updateResume = (id, updates) =>
+  apiClient.patch(`/resumes/${id}`, updates);
 
-export const deleteResume = async (id) => {
-  return apiClient.delete(`/resumes/${id}`);
-};
+export const deleteResume = (id) =>
+  apiClient.delete(`/resumes/${id}`);
 
 export const getResumeDownloadUrl = (id) => {
   const token = localStorage.getItem("placeprepToken") || "";
@@ -44,28 +40,32 @@ export const getResumePreviewUrl = (id) => {
   return `${baseURL}/resumes/${id}/preview?token=${encodeURIComponent(token)}`;
 };
 
-export const downloadResumeBlob = async (id, defaultFileName = "resume.pdf") => {
-  try {
-    const token = localStorage.getItem("placeprepToken");
-    const response = await fetch(`${baseURL}/resumes/${id}/download`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+export const downloadResumeBlob = async (
+  id,
+  defaultFileName = "resume.pdf"
+) => {
+  const token = localStorage.getItem("placeprepToken");
 
-    if (!response.ok) {
-      throw new Error("Failed to download file from server.");
-    }
+  const response = await fetch(`${baseURL}/resumes/${id}/download`, {
+    headers: token
+      ? { Authorization: `Bearer ${token}` }
+      : {},
+  });
 
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.setAttribute("download", defaultFileName);
-    document.body.appendChild(link);
-    link.click();
-    link.parentNode.removeChild(link);
-    window.URL.revokeObjectURL(url);
-  } catch (err) {
-    console.error("Download failed:", err);
-    throw err;
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.message || "Failed to download resume.");
   }
+
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = defaultFileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.URL.revokeObjectURL(url);
 };
